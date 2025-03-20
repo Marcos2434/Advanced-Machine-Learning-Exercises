@@ -226,6 +226,8 @@ def train(model, optimizer, data_loader, epochs, device):
     for epoch in range(epochs):
         data_iter = iter(data_loader)
         for x in data_iter:
+            if isinstance(x, list):
+                x = x[0]
             x = x.to(device)
             optimizer.zero_grad()
             loss = model.loss(x)
@@ -250,11 +252,14 @@ if __name__ == "__main__":
     # python3 flow.py sample --data tg --model model.pt --samples samples_tg.png --device mps
     
     # python3 flow.py train --data cb --model model.pt --device mps --batch-size 10000 --epochs 1 --lr 1e-3
-    # python3 flow.py sample --data tg --model model.pt --samples_cb samples.png --device mps
+    # python3 flow.py sample --data cb --model model.pt --samples samples_cb.png --device mps
+    
+    # python3 flow.py train --data mnist --model model.pt --device mps --batch-size 10000 --epochs 30 --lr 1e-3
+    # python3 flow.py sample --data mnist --model model.pt --samples samples_mnist.png --device mps
     
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', type=str, default='train', choices=['train', 'sample', 'test'], help='what to do when running the script (default: %(default)s)')
-    parser.add_argument('--data', type=str, default='tg', choices=['tg', 'cb'], help='toy dataset to use {tg: two Gaussians, cb: chequerboard} (default: %(default)s)')
+    parser.add_argument('--data', type=str, default='tg', choices=['tg', 'cb', 'mnist'], help='toy dataset to use {tg: two Gaussians, cb: chequerboard} (default: %(default)s)')
     parser.add_argument('--model', type=str, default='model.pt', help='file to save model to or load model from (default: %(default)s)')
     parser.add_argument('--samples', type=str, default='samples.png', help='file to save samples in (default: %(default)s)')
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], help='torch device (default: %(default)s)')
@@ -267,14 +272,31 @@ if __name__ == "__main__":
     for key, value in sorted(vars(args).items()):
         print(key, '=', value)
 
-    # Generate the data
-    n_data = 10000000
-    toy = {'tg': ToyData.TwoGaussians, 'cb': ToyData.Chequerboard}[args.data]()
-    train_loader = torch.utils.data.DataLoader(toy().sample((n_data,)), batch_size=args.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(toy().sample((n_data,)), batch_size=args.batch_size, shuffle=True)
+    
+    if args.data == 'mnist':
+        transform = transforms.Compose([transforms.ToTensor(),
+                                      transforms.Lambda(lambda x: x + torch.rand(x.shape)/255),
+                                    #   transforms.Normalize((0.5,), (0.5,)),  # Normalize to [-1, 1]
+                                      transforms.Lambda(lambda x: x.flatten())])
+        train_data = datasets.MNIST(root="./data", train=True, transform=transform, download=True)
+        test_data = datasets.MNIST(root="./data", train=False, transform=transform, download=True)
+        train_loader = torch.utils.data.DataLoader(dataset=train_data, batch_size=args.batch_size, shuffle=True)
+        test_loader = torch.utils.data.DataLoader(dataset=test_data, batch_size=args.batch_size, shuffle=False)
+
+        D = next(iter(train_loader))[0].shape[1]
+        height, width = 28, 28  # MNIST is 28x28
+    
+    else:
+        # Generate toy data
+        n_data = 10000000
+        toy = {'tg': ToyData.TwoGaussians, 'cb': ToyData.Chequerboard}[args.data]()
+        train_loader = torch.utils.data.DataLoader(toy().sample((n_data,)), batch_size=args.batch_size, shuffle=True)
+        test_loader = torch.utils.data.DataLoader(toy().sample((n_data,)), batch_size=args.batch_size, shuffle=True)
+
+        D = next(iter(train_loader)).shape[1]
+        height, width = 1, D  # For 2D toy data, set arbitrary height and width
 
     # Define prior distribution
-    D = next(iter(train_loader)).shape[1]
     base = GaussianBase(D)
 
     # Define transformations
@@ -285,8 +307,8 @@ if __name__ == "__main__":
     num_hidden = 16 # Number of hidden units in the scaling and translation networks
 
     # Make a mask that is 1 for the first half of the features and 0 for the second half
-    mask = torch.zeros((D,))
-    mask[D//2:] = 1
+    # mask = torch.zeros((D,))
+    # mask[D//2:] = 1
     
     for i in range(num_transformations):
         mask = (1-mask) # Flip the mask
@@ -300,7 +322,7 @@ if __name__ == "__main__":
     # Choose mode to run
     if args.mode == 'train':
         # Define optimizer
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-5)
 
         # Train model
         train(model, optimizer, train_loader, args.epochs, args.device)
@@ -314,24 +336,47 @@ if __name__ == "__main__":
 
         model.load_state_dict(torch.load(args.model, map_location=torch.device(args.device)))
 
-        # Generate samples
-        model.eval()
-        with torch.no_grad():
-            samples = (model.sample((10000,))).cpu() 
+        if args.data == 'mnist':
+            # Generate samples
+            num_samples = 100
 
-        # Plot the density of the toy data and the model samples
-        coordinates = [[[x,y] for x in np.linspace(*toy.xlim, 1000)] for y in np.linspace(*toy.ylim, 1000)]
-        prob = torch.exp(toy().log_prob(torch.tensor(coordinates)))
+            model.eval()
+            with torch.no_grad():
+                samples = (model.sample((num_samples,))).cpu() 
 
-        fig, ax = plt.subplots(1, 1, figsize=(7, 5))
-        im = ax.imshow(prob, extent=[toy.xlim[0], toy.xlim[1], toy.ylim[0], toy.ylim[1]], origin='lower', cmap='YlOrRd')
-        ax.scatter(samples[:, 0], samples[:, 1], s=1, c='black', alpha=0.5)
-        ax.set_xlim(toy.xlim)
-        ax.set_ylim(toy.ylim)
-        ax.set_aspect('equal')
-        fig.colorbar(im)
-        plt.savefig(args.samples)
-        plt.close()
+            # Transform the samples back to the original space
+            # samples = samples * 0.5 + 0.5
+            samples = samples.reshape(-1, 1, 28, 28)
+
+            fig = plt.figure(figsize=(8, 8))
+            columns = 10
+            rows = 10
+            for i in range(1, columns * rows + 1):
+                img = samples[i - 1].cpu().detach().numpy().transpose(1, 2, 0).squeeze()
+                fig.add_subplot(rows, columns, i)
+                plt.axis('off')
+                plt.imshow(img, cmap='gray')
+            plt.savefig(args.samples)
+            plt.close()
+        else:
+            # Generate samples
+            model.eval()
+            with torch.no_grad():
+                samples = (model.sample((10000,))).cpu() 
+
+            # Plot the density of the toy data and the model samples
+            coordinates = [[[x,y] for x in np.linspace(*toy.xlim, 1000)] for y in np.linspace(*toy.ylim, 1000)]
+            prob = torch.exp(toy().log_prob(torch.tensor(coordinates)))
+
+            fig, ax = plt.subplots(1, 1, figsize=(7, 5))
+            im = ax.imshow(prob, extent=[toy.xlim[0], toy.xlim[1], toy.ylim[0], toy.ylim[1]], origin='lower', cmap='YlOrRd')
+            ax.scatter(samples[:, 0], samples[:, 1], s=1, c='black', alpha=0.5)
+            ax.set_xlim(toy.xlim)
+            ax.set_ylim(toy.ylim)
+            ax.set_aspect('equal')
+            fig.colorbar(im)
+            plt.savefig(args.samples)
+            plt.close()
     
     elif args.mode == 'test':
         # Generate the TwoGaussians dataset

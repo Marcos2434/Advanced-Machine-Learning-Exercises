@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torchvision import transforms, datasets
 from unet import Unet
+import matplotlib.pyplot as plt
+import numpy as np
 
 class DDPM(nn.Module):
     def __init__(self, network, beta_1=1e-4, beta_T=2e-2, T=100):
@@ -45,20 +47,20 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The negative ELBO of the batch of dimension `(batch_size,)`.
         """
-        
         ### Implement Algorithm 1 here ###
+        
         # Algorithm 1 in DDPM paper
         batch_size = x0.shape[0]
-        t = torch.randint(1, T, (batch_size,), device=x0.device)
-        epsilon = torch.randn_like(x0) # sample from ε ~ 𝒩(0, I)
+        t = torch.randint(0, self.T-1, (batch_size, 1), device=x0.device)
+        epsilon = torch.randn_like(x0).to(device=x0.device) # sample from ε ~ 𝒩(0, I)
         alpha_bar_t = self.alpha_cumprod[t]
         
         # negative elbo eq. 14
-        epsilon_theta = self.network(torch.sqrt(alpha_bar_t).unsqueeze(1) * x0 + torch.sqrt(1 - alpha_bar_t.unsqueeze(1)) * epsilon, t.unsqueeze(1))
+        epsilon_theta = self.network(torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * epsilon, t)
         loss = F.mse_loss(epsilon_theta, epsilon)
-        elbo = torch.mean(loss, dim=list(range(1, loss.ndim))) # mean over all dimensions but the batch dimension
+        # elbo = torch.mean(loss, dim=list(range(1, loss.ndim))) # mean over all dimensions but the batch dimension
         
-        return elbo
+        return loss
 
     def sample(self, shape):
         """
@@ -71,19 +73,19 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The generated samples.
         """
+    
         # Sample x_t for t=T (i.e., Gaussian noise)
         x_t = torch.randn(shape).to(self.alpha.device)
 
         # Sample x_t given x_{t+1} until x_0 is sampled
         for t in range(self.T-1, -1, -1):
-            t_tensor = torch.full((shape[0], 1), t, device=self.alpha.device, dtype=torch.float)
             ### Implement the remaining of Algorithm 2 here ###
-            z = torch.randn_like(x_t).to(self.alpha.device) if t > 1 else torch.zeros_like(x_t).to(self.alpha.device)
+            tensor_t = torch.full((shape[0], 1), t).to(x_t.device)
+            z = torch.randn_like(x_t).to(self.alpha.device) if t > 0 else torch.zeros_like(x_t).to(self.alpha.device)
             alpha_t = self.alpha[t]
             alpha_bar_t = self.alpha_cumprod[t]
-            beta_t = self.beta[t]
-            epsilon_theta = self.network(x_t, t_tensor)
-            sigma_t = torch.sqrt(beta_t)
+            epsilon_theta = self.network(x_t, tensor_t)
+            sigma_t = torch.sqrt(self.beta[t])
             
             x_t = (1/torch.sqrt(alpha_t)) * (x_t - ( ((1-alpha_t)/torch.sqrt(1-alpha_bar_t)) * epsilon_theta)) + sigma_t * z
             
@@ -141,10 +143,6 @@ def train(model, optimizer, data_loader, epochs, device):
             progress_bar.update()
 
 
-# python3 ddpm.py test --data tg --model model.pt --device mps --batch-size 64 --epochs 1 --lr 1e-3
-# python3 ddpm.py train --data tg --model model.pt --device mps --batch-size 64 --epochs 1 --lr 1e-3
-# python3 ddpm.py sample_MNIST --data tg --model model.pt --device mps --batch-size 64 --epochs 1 --lr 1e-3 --samples samples.png
-
 class FcNetwork(nn.Module):
     def __init__(self, input_dim, num_hidden):
         """
@@ -173,6 +171,10 @@ class FcNetwork(nn.Module):
         """
         x_t_cat = torch.cat([x, t], dim=1)
         return self.network(x_t_cat)
+
+# python3 ddpm.py test --data tg --model model.pt --device mps --batch-size 64 --epochs 1 --lr 1e-3
+# python3 ddpm.py train --data tg --model model.pt --device mps --batch-size 64 --epochs 1 --lr 1e-3
+# python3 ddpm.py sample_MNIST --data tg --model model.pt --device mps --batch-size 64 --epochs 1 --lr 1e-3 --samples samples.png
 
 if __name__ == "__main__":
     import torch.utils.data
@@ -208,7 +210,11 @@ if __name__ == "__main__":
                                 train=True,
                                 download=True,
                                 transform=transform)
+    test_data = datasets.MNIST(root="./data", train=False, transform=transform, download=True)
+    
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=64, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(dataset=test_data, batch_size=args.batch_size, shuffle=False)
+    D = next(iter(train_loader))[0].shape[1]
     
     # Generate the data for toy example
     # n_data = 10000000
@@ -243,17 +249,26 @@ if __name__ == "__main__":
 
     elif args.mode == 'sample_MNIST':
         model.load_state_dict(torch.load(args.model, map_location=torch.device(args.device)))
+        num_samples = 100
+
         model.eval()
         with torch.no_grad():
-            # U-Net model expects input tensors with the shape (batch_size, 1, 28, 28) but flattened: (batch_size, 1*28*28) -> (batch_size, 784)
-            # so we can generate 10 MNIST images like so
-            samples = model.sample((10, 784))
-        print(samples)
-        samples_img = samples.reshape(-1, 1, 28, 28)  # shape: (10, 1, 28, 28)
-        # since we have data in [-1,1], convert it to [0,1]
-        samples_img = (samples_img + 1) / 2
-        save_image(samples_img, "sample_mnist.png", nrow=5)
-        
+            samples = (model.sample((num_samples, D))).cpu() 
+
+        # Transform the samples back to the original space
+        samples = samples / 2 + 0.5
+        samples = samples.reshape(-1, 1, 28, 28)
+
+        fig = plt.figure(figsize=(8, 8))
+        columns = 10
+        rows = 10
+        for i in range(1, columns * rows + 1):
+            img = samples[i - 1].cpu().detach().numpy().transpose(1, 2, 0).squeeze()
+            fig.add_subplot(rows, columns, i)
+            plt.axis('off')
+            plt.imshow(img, cmap='gray')
+        plt.savefig(args.samples)
+        plt.close()
         
     elif args.mode == 'sample':
         import matplotlib.pyplot as plt
