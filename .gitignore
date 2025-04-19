@@ -1,0 +1,67 @@
+# Python specific files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+.ENV/
+
+# Machine Learning specific files
+*.h5
+*.hdf5
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.joblib
+*.pkl
+*.pickle
+
+# TensorBoard logs
+logs/
+events.out.tfevents.*
+
+# Dataset files
+*.csv
+*.tsv
+*.data
+*.dat
+*.jsonl
+*.json
+*.xml
+*.yaml
+*.yml
+*.parquet
+*.feather
+*.avro
+*.orc
+*.gz
+*.zip
+*.tar
+*.bz2
+
+# Model artifacts
+models/
+saved_models/
+
+# Model checkpoints
+checkpoints/
+*.ckpt
+
+*.pt
+
+*.txt
